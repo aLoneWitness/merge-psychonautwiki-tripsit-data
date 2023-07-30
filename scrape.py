@@ -113,47 +113,6 @@ ts_data = ts_response.json()["data"][0]
 ts_substances_data = list(ts_data.values())
 
 
-# TS has durations split over a few keys, so this finds or creates the duration for the associated ROA
-# and adds a new line item
-def ts_add_formatted_duration(ts_roas, formatted_duration, duration_name):
-    units = formatted_duration.get("_unit", "") or ""
-    if "_unit" in formatted_duration:
-        formatted_duration.pop("_unit")
-
-    def add_to_roa(roa, value):
-        if "duration" not in roa:
-            roa["duration"] = []
-
-        roa["duration"].append({"name": duration_name, "value": value})
-
-    for roa_name, value in formatted_duration.items():
-        value_string = f"{value} {units}".strip()
-
-        # if value present (i.e. just one value for all ROA doses provided above), apply to all ROAs
-        if roa_name == "value":
-            # if TS did not add any doses, do nothing with this value
-            # we could theoretically apply this to all PW doses with missing durations, but we can't be sure
-            # if it applies to all ROAs, so just ignore
-            if not len(ts_roas):
-                break
-
-            for ts_roa in ts_roas:
-                add_to_roa(ts_roa, value_string)
-
-        # add to matching ROA or create new ROA if doesn't exist
-        else:
-            ts_roa = next(
-                (ts_roa for ts_roa in ts_roas if roa_matches_name(ts_roa, roa_name)),
-                None,
-            )
-            # if ROA doesn't exist, make new
-            if not ts_roa:
-                ts_roa = {"name": roa_name}
-                ts_roas.append(ts_roa)
-
-            add_to_roa(ts_roa, value_string)
-
-
 # get psychonautwiki data
 
 
@@ -195,7 +154,7 @@ if os.path.exists("_cached_pw_substances.json"):
 if not len(pw_substance_data):
     pw_substance_urls_query = """
     {
-        substances(limit: 11000) {
+        substances(limit: 50) {
             name
             url
         }
@@ -269,44 +228,6 @@ if not len(pw_substance_data):
                     curr_row = curr_row.find_next("tr")
                 return rows, curr_row
 
-            roas = []
-
-            dose_charts = substance_soup.find_all("tr", {"class": "dosechart"})
-            for dose_chart in dose_charts:
-                table = dose_chart.parent.parent
-                roa_name = table.find("tr").find("a").text
-                if not roa_name:
-                    continue
-
-                roa = {
-                    "name": roa_name,
-                    "dosage": [],
-                    "duration": [],
-                }
-
-                # dosage
-
-                curr_row = dose_chart.find_next("tr")
-                roa["dosage"], curr_row = get_data_starting_at_row(curr_row)
-
-                # extract bioavailability
-                if len(roa["dosage"]) and roa["dosage"][0]["name"] == "Bioavailability":
-                    bioavailability = roa["dosage"].pop(0)
-                    roa["bioavailability"] = bioavailability["value"]
-
-                # duration
-
-                if curr_row.find("th", {"class": "ROASubHeader"}):
-                    curr_row = curr_row.find_next("tr")
-                    roa["duration"], _ = get_data_starting_at_row(curr_row)
-
-                if not len(roa["dosage"]):
-                    roa["dosage"] = None
-                if not len(roa["duration"]):
-                    roa["duration"] = None
-
-                roas.append(roa)
-
             # query PS API for more data on substance
 
             query = (
@@ -326,11 +247,35 @@ if not len(pw_substance_data):
                         toxicity
                         addictionPotential
                         crossTolerances
+                        roas {
+                            name
+                            dose {
+                units
+                threshold
+                heavy
+                common { min max }
+                light { min max }
+                strong { min max }
+            }
+
+            duration {
+                afterglow { min max units }
+                comeup { min max units }
+                duration { min max units }
+                offset { min max units }
+                onset { min max units }
+                peak { min max units }
+                total { min max units }
+            }
+
+                        }
                     }
                 }
             """
                 % substance["name"]
             )
+
+
 
             data = try_three_times(
                 lambda: ps_client.execute(query=query)["data"]["substances"]
@@ -345,15 +290,21 @@ if not len(pw_substance_data):
             if "name" in data:
                 data.pop("name")
 
+
+            roas = []
+            roas = data["roas"]
+
             pw_substance_data.append(
                 {
                     "url": url,
                     "name": name,
                     "aliases": common_names,
-                    "roas": roas,
                     "data": data,
+                    "roas": roas
                 }
             )
+
+            
 
             if args.quiet:
                 print(".", end="")
@@ -475,81 +426,7 @@ for name in all_substance_names:
     # get PW ROAs
     pw_roas = pw_substance.get("roas", [])
 
-    # process TS ROAs
-    ts_roas = []
-
-    # TS ROA dosage
-    ts_formatted_dose = ts_substance.get("formatted_dose")
-    if ts_formatted_dose:
-        for roa_name, dose_data in ts_formatted_dose.items():
-            dose_levels = []
-            for dose_level in ts_dose_order:
-                value_string = dose_data.get(dose_level)
-                if value_string is None:
-                    continue
-
-                dose_levels.append(
-                    {
-                        "name": dose_level,
-                        "value": value_string,
-                    }
-                )
-
-            if len(dose_levels):
-                ts_roas.append({"name": roa_name, "dosage": dose_levels})
-
-    # TS ROA durations
-    ts_formatted_onset = ts_substance.get("formatted_onset")
-    if ts_formatted_onset:
-        ts_add_formatted_duration(ts_roas, ts_formatted_onset, "Onset")
-
-    ts_formatted_duration = ts_substance.get("formatted_duration")
-    if ts_formatted_duration:
-        ts_add_formatted_duration(ts_roas, ts_formatted_duration, "Duration")
-
-    ts_formatted_aftereffects = ts_substance.get("formatted_aftereffects")
-    if ts_formatted_aftereffects:
-        ts_add_formatted_duration(ts_roas, ts_formatted_aftereffects, "After effects")
-
-    # merge PW and TS ROAs
-    # prioritize PW for ROAs but use TS to fill in gaps
-
     roas.extend(pw_roas)
-    for ts_roa in ts_roas:
-        existing_roa = next(
-            (roa for roa in roas if roa_matches_name(roa, ts_roa["name"])), None
-        )
-        # if ROA does not exist, add
-        if not existing_roa:
-            existing_roa = ts_roa
-            roas.append(existing_roa)
-            # we want bioavailability from below, so don't skip
-
-        # if ROA does not already have bioavailability, try to get from TS
-        if not existing_roa.get("bioavailability"):
-            name_lower = ts_roa["name"].lower()
-            name_aliases = roa_name_aliases.get(name_lower, [])
-
-            alias_found = next(
-                (name_alias in ts_bioavailability for name_alias in name_aliases), None
-            )
-            # TS has bioavailability if name or any name alias is found
-            if name_lower in ts_bioavailability or alias_found:
-                existing_roa["bioavailability"] = ts_bioavailability.get(
-                    name_lower
-                ) or ts_bioavailability.get(alias_found)
-
-        # if existing ROA is missing dosage and TS has dosage, add
-        if (not existing_roa.get("dosage") or not len(existing_roa["dosage"])) and (
-            "dosage" in ts_roa and ts_roa["dosage"] and len(ts_roa["dosage"])
-        ):
-            existing_roa["dosage"] = ts_roa["dosage"]
-
-        # if existing ROA is missing duration and TS has duration, add
-        if (not existing_roa.get("duration") or not len(existing_roa["duration"])) and (
-            "duration" in ts_roa and ts_roa["duration"] and len(ts_roa["duration"])
-        ):
-            existing_roa["duration"] = ts_roa["duration"]
 
     interactions = None
     combos = ts_substance.get("combos")
@@ -562,6 +439,17 @@ for name in all_substance_names:
             combo_data["name"] = ts_combo_transformations[key]
             interactions.append(combo_data)
         interactions = sorted(interactions, key=lambda i: i["name"])
+
+    ## Time to filter useless data
+    if len(roas) < 1:
+        continue
+
+    for indexxi, roai in enumerate(roas):
+        if roai["duration"] is None:
+            roas.pop(indexxi)
+
+
+    
 
     substance_data.append(
         {
