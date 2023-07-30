@@ -154,7 +154,7 @@ if os.path.exists("_cached_pw_substances.json"):
 if not len(pw_substance_data):
     pw_substance_urls_query = """
     {
-        substances(limit: 50) {
+        substances(limit: 11000) {
             name
             url
         }
@@ -440,13 +440,22 @@ for name in all_substance_names:
             interactions.append(combo_data)
         interactions = sorted(interactions, key=lambda i: i["name"])
 
+    roaresult = []
+    for indexxi, roai in enumerate(roas):
+        if roai["duration"] is None:
+            continue
+        else:
+            roaresult.append(roai)
+
+    roas = roaresult
+
     ## Time to filter useless data
     if len(roas) < 1:
         continue
 
-    for indexxi, roai in enumerate(roas):
-        if roai["duration"] is None:
-            roas.pop(indexxi)
+    
+
+    
 
 
     
